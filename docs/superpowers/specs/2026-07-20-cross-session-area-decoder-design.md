@@ -1,10 +1,10 @@
-# 学习前训练、学习后测试的脑区级 Decoder 设计
+# 双向跨学习阶段的脑区级 Decoder 设计
 
 ## 目标
 
 在不要求学习前后神经元一一配准的前提下，检验学习前训练得到的 `leaf1` / `circle1` decoder 能否直接泛化到学习后数据，并分别评估 `V1`、`medial`、`lateral` 和 `anterior` 脑区。
 
-核心科学问题是脑区总体表征能否跨学习阶段保持，而不是同一批神经元的 readout 权重是否保持。
+核心科学问题是脑区总体表征能否跨学习阶段保持，而不是同一批神经元的 readout 权重是否保持。学习前→学习后仍是主要方向；新增学习后→学习前作为对称性检查，用于判断跨阶段泛化是否依赖训练方向。
 
 ## 数据范围
 
@@ -15,7 +15,7 @@
 - 脑区标签：对应日期的 `_trans.npz` 文件中的 `iarea`
 - 走廊位置：每个试次 60 个位置分箱，其中 0–39 为纹理区域，40–59 为灰色区域
 
-学习后活动可以用于不依赖刺激标签的会话内归一化。学习后 `leaf1` / `circle1` 标签只能用于最终评分和单独标记的学习后内部交叉验证基线。
+每个会话的活动都可以用于不依赖刺激标签的会话内归一化。在主要的学习前→学习后分析中，学习后 `leaf1` / `circle1` 标签只能用于最终评分和单独标记的学习后内部交叉验证基线。在新增的学习后→学习前分析中，学习后标签属于训练标签，而学习前标签只能用于该反方向的最终评分。两个方向的模型和统计结果必须明确分开，不能利用某一方向的测试标签调参。
 
 ## 共同特征空间
 
@@ -88,33 +88,49 @@ StandardScaler
 )
 ```
 
-`StandardScaler` 只在学习前特征上拟合。训练完成后，完全不重新拟合 scaler 或分类器，直接对学习后特征执行 `transform`、`predict` 和 `predict_proba`。
+学习前→学习后方向的 `StandardScaler` 和分类器只在学习前特征上拟合；训练完成后直接预测学习后特征。学习后→学习前方向使用一个独立 pipeline，只在学习后特征上拟合，然后直接预测学习前特征。任何方向都不能在目标会话上重新拟合 scaler 或分类器。
 
-第一版固定 `C=1.0`，避免利用学习后结果选择超参数。若以后增加超参数搜索，只能在学习前数据内部通过嵌套交叉验证完成。
+第一版固定 `C=1.0`，避免利用任一方向的目标会话结果选择超参数。若以后增加超参数搜索，每个方向只能在自己的源会话内部通过嵌套交叉验证完成。
+
+实现保留现有的单方向 `evaluate_transfer` 接口，并交换输入完成反方向分析：
+
+```python
+forward_metrics, forward_artifacts = evaluate_transfer(
+    X_before, y_before, X_after, y_after,
+)
+reverse_metrics, reverse_artifacts = evaluate_transfer(
+    X_after, y_after, X_before, y_before,
+)
+```
+
+这样两个方向共享完全相同的评估代码，同时分别保存 pipeline、预测、概率、混淆矩阵、bootstrap 分数和 permutation 分数。结果表与图中必须使用明确的 `Before → after` 和 `After → before` 标签，避免把反方向结果误认为原来的核心方向。
 
 ## 评估
 
-每个脑区报告三项互补结果：
+每个脑区报告四项互补结果：
 
 1. **学习前内部基线**：学习前数据的分层 5 折交叉验证。
 2. **学习后内部基线**：学习后数据的分层 5 折交叉验证，仅用于判断学习后是否存在可解码信息。
-3. **核心 transfer 结果**：在全部学习前试次上拟合模型，不进行任何重训，直接预测全部学习后试次。
+3. **核心前→后 transfer 结果**：在全部学习前试次上拟合模型，不进行任何重训，直接预测全部学习后试次。
+4. **反方向后→前 transfer 结果**：在全部学习后试次上拟合一个独立模型，不进行任何重训，直接预测全部学习前试次。
+
+两个 transfer 方向使用相同的特征定义、模型超参数和统计流程。反方向是稳定性与域偏移的补充检查，不代表时间因果关系；两个训练集的试次数不同，因此方向差异不能仅凭两个点估计解释为学习导致的变化。
 
 主要指标为：
 
 - balanced accuracy，机会水平为 0.5；
 - ROC AUC，以 `leaf1` 为正类；
 - confusion matrix；
-- 学习后试次的分层 bootstrap 95% 置信区间；
-- 学习前标签 permutation 检验。
+- 目标会话试次的分层 bootstrap 95% 置信区间；
+- 源会话训练标签 permutation 检验。
 
 ### Bootstrap
 
-在 `circle1` 和 `leaf1` 内部分别有放回抽样学习后试次，再合并计算 transfer balanced accuracy。执行 2,000 次，报告 2.5% 和 97.5% 分位数。分层抽样保证每次重采样都包含两个类别。
+每个方向都在目标会话的 `circle1` 和 `leaf1` 内分别有放回抽样，再合并计算 transfer balanced accuracy。前→后方向抽样学习后试次；后→前方向抽样学习前试次。每个方向执行 2,000 次，报告 2.5% 和 97.5% 分位数。分层抽样保证每次重采样都包含两个类别。
 
 ### Permutation 检验
 
-随机打乱学习前标签 1,000 次。每次重新拟合同一 pipeline，并在未经重训的学习后数据上评分。单侧 p 值定义为：
+每个方向随机打乱源会话的训练标签 1,000 次。前→后方向打乱学习前标签并在学习后评分；后→前方向打乱学习后标签并在学习前评分。每次重新拟合同一方向的 pipeline，并在未经重训的目标会话上评分。单侧 p 值定义为：
 
 ```text
 p = (1 + sum(null_score >= observed_score)) / (1 + permutation 次数)
@@ -131,16 +147,16 @@ p = (1 + sum(null_score >= observed_score)) / (1 + permutation 次数)
 - 学习前内部 balanced accuracy；
 - 学习后内部 balanced accuracy；
 - 前→后 transfer balanced accuracy；
-- transfer ROC AUC；
-- bootstrap 95% 置信区间；
-- permutation p 值。
+- 前→后 transfer ROC AUC、bootstrap 95% 置信区间和 permutation p 值；
+- 后→前 transfer balanced accuracy；
+- 后→前 transfer ROC AUC、bootstrap 95% 置信区间和 permutation p 值。
 
 生成以下图形：
 
-1. 各脑区 transfer balanced accuracy 条形图或点图，带 bootstrap 95% 置信区间和 0.5 机会水平线；
-2. 学习前内部、学习后内部和前→后 transfer 三种准确率的并列比较图；
-3. 每个脑区的 transfer confusion matrix；
-4. 各脑区 permutation 零分布及观测值位置。
+1. 各脑区前→后与后→前 transfer balanced accuracy 的并列点图，分别带 bootstrap 95% 置信区间和 0.5 机会水平线；
+2. 学习前内部、学习后内部、前→后和后→前四种准确率的并列比较图；
+3. 每个脑区两个 transfer 方向的 confusion matrix；
+4. 各脑区两个方向的 permutation 零分布及观测值位置。
 
 ## 解释框架
 
@@ -153,6 +169,8 @@ p = (1 + sum(null_score >= observed_score)) / (1 + permutation 次数)
 
 对于“高”或“低”的判断，应同时考虑交叉验证置信区间、transfer bootstrap 区间和 permutation 检验，而不是只使用单个点估计。
 
+若两个 transfer 方向都高，说明当前脑区平均特征具有较强的双向跨阶段稳定性。若只有一个方向高，首先应考虑训练试次数、类别分布、方差和决策阈值造成的方向不对称；在没有对方向差值进行专门统计检验前，不能把这种不对称直接解释为学习的因果效应。
+
 ## Notebook 集成范围
 
 保留已有的数据下载、SVD 加载、行为读取和“帧→试次×位置”插值部分。只重构 decoder 相关单元：
@@ -160,7 +178,7 @@ p = (1 + sum(null_score >= observed_score)) / (1 + permutation 次数)
 - 删除两个连续且互相覆盖的 `%%writefile decoding.py` 单元；
 - 使用一个自包含的 decoder 工具函数单元，避免模块缓存和隐藏状态；
 - 删除依赖未明确初始化的 `keep`、`beh` 等调试单元；
-- 新增脑区共同特征、灰色区域归一化、三种评估、bootstrap、permutation、表格和绘图单元；
+- 新增脑区共同特征、灰色区域归一化、两个会话内基线、双向 transfer、bootstrap、permutation、表格和绘图单元；
 - 所有 Markdown 说明和新增代码注释使用中文；
 - 不把旧的缓存输出当作新分析结果，完成后从头执行 notebook。
 
@@ -175,7 +193,9 @@ p = (1 + sum(null_score >= observed_score)) / (1 + permutation 次数)
 - 特征与标签的试次数一致；
 - 学习前和学习后都同时包含 `circle1` 与 `leaf1`；
 - 学习前和学习后的最终特征列数都等于 40；
-- transfer 阶段没有对 scaler 或分类器重新调用 `fit`。
+- 前→后 pipeline 的 scaler 与分类器只在学习前数据上调用 `fit`；
+- 后→前 pipeline 的 scaler 与分类器只在学习后数据上调用 `fit`；
+- 两个 transfer 方向都没有在目标会话上重新调用 `fit`。
 
 Notebook 应在 Colab 数据环境中从头执行完成。若因本机缺少 `/content/Zhong_et_al_2025` 数据而无法本地执行，则至少要通过 notebook 结构验证、Python 语法验证和不依赖实际数据的合成数组单元测试，并明确记录完整执行所需的 Colab 命令和数据条件。
 
@@ -184,5 +204,6 @@ Notebook 应在 Colab 数据环境中从头执行完成。若因本机缺少 `/c
 - 跨会话单神经元配准；
 - 直接对齐两个会话独立拟合的 SVD 坐标；
 - CCA、Procrustes、CORAL 等潜在空间对齐；
-- 使用学习后标签调参、选择归一化方式或筛选脑区；
+- 使用任一方向的目标会话标签调参、选择归一化方式或筛选脑区；
+- 将两个 transfer 方向的差异直接解释为学习的因果效应；
 - 将单只小鼠、两个会话的结果推广到群体水平结论。
