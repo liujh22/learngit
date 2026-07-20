@@ -179,3 +179,19 @@ def test_bidirectional_transfer_fits_each_scaler_only_on_source_session():
     assert set(metrics) == {"before_to_after", "after_to_before"}
     assert len(artifacts["before_to_after"]["bootstrap_scores"]) == 10
     assert len(artifacts["after_to_before"]["permutation_scores"]) == 10
+
+
+def test_notebook_reports_both_transfer_directions():
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    source = "\n".join(cell.source for cell in notebook.cells)
+    required = [
+        "evaluate_bidirectional_transfer(",
+        '"after_to_before_balanced_accuracy"',
+        '"after_to_before_roc_auc"',
+        '"after_to_before_bootstrap_ci_low"',
+        '"after_to_before_bootstrap_ci_high"',
+        '"after_to_before_permutation_p"',
+        '"After → before"',
+    ]
+    for value in required:
+        assert value in source
