@@ -31,6 +31,7 @@ def test_notebook_contains_one_decoder_utility_cell():
     assert callable(namespace["encode_leaf_circle_labels"])
     assert callable(namespace["make_decoder"])
     assert callable(namespace["evaluate_transfer"])
+    assert callable(namespace["evaluate_bidirectional_transfer"])
 
 
 def test_area_masks_use_exact_visual_area_mapping():
@@ -137,3 +138,44 @@ def test_transfer_fits_scaler_only_on_before_features():
     assert 0.0 <= metrics["permutation_p"] <= 1.0
     assert len(artifacts["bootstrap_scores"]) == 20
     assert len(artifacts["permutation_scores"]) == 20
+
+
+def test_bidirectional_transfer_fits_each_scaler_only_on_source_session():
+    namespace = load_decoder_namespace()
+    rng = np.random.default_rng(8)
+    labels_before = np.tile([0, 1], 20)
+    labels_after = np.tile([0, 1], 25)
+    features_before = (
+        rng.normal(scale=0.3, size=(40, 40))
+        + labels_before[:, None] * 1.5
+    )
+    features_after = (
+        rng.normal(scale=0.3, size=(50, 40))
+        + labels_after[:, None] * 1.5
+        + 4.0
+    )
+
+    metrics, artifacts = namespace["evaluate_bidirectional_transfer"](
+        features_before,
+        labels_before,
+        features_after,
+        labels_after,
+        n_bootstrap=10,
+        n_permutations=10,
+    )
+
+    forward_scaler = artifacts["before_to_after"]["pipeline"].named_steps[
+        "standardscaler"
+    ]
+    reverse_scaler = artifacts["after_to_before"]["pipeline"].named_steps[
+        "standardscaler"
+    ]
+    np.testing.assert_allclose(
+        forward_scaler.mean_, features_before.mean(axis=0)
+    )
+    np.testing.assert_allclose(
+        reverse_scaler.mean_, features_after.mean(axis=0)
+    )
+    assert set(metrics) == {"before_to_after", "after_to_before"}
+    assert len(artifacts["before_to_after"]["bootstrap_scores"]) == 10
+    assert len(artifacts["after_to_before"]["permutation_scores"]) == 10
