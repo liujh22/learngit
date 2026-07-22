@@ -8,6 +8,7 @@ import pytest
 NOTEBOOK = Path(__file__).parents[1] / "Group_B_working_code.ipynb"
 MARKER = "# CROSS_SESSION_AREA_DECODER_UTILS"
 TRIAL_POSITION_MARKER = "# TRIAL_POSITION_UTILS"
+POPULATION_DIAGNOSTICS_MARKER = "# POPULATION_DIAGNOSTICS_UTILS"
 
 
 def load_decoder_namespace():
@@ -35,6 +36,22 @@ def load_trial_position_namespace():
     ]
     assert len(matches) == 1, (
         f"expected one trial-position utility cell, found {len(matches)}"
+    )
+    namespace = {}
+    exec(compile(matches[0], str(NOTEBOOK), "exec"), namespace)
+    return namespace
+
+
+def load_population_diagnostics_namespace():
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    matches = [
+        cell.source
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        and POPULATION_DIAGNOSTICS_MARKER in cell.source
+    ]
+    assert len(matches) == 1, (
+        f"expected one population-diagnostics cell, found {len(matches)}"
     )
     namespace = {}
     exec(compile(matches[0], str(NOTEBOOK), "exec"), namespace)
@@ -280,3 +297,74 @@ def test_notebook_documents_non_obvious_decoder_steps():
     ]
     for explanation in required_explanations:
         assert explanation in source
+
+
+def test_v1_trial_features_equal_explicit_reconstruction():
+    namespace = load_population_diagnostics_namespace()
+    rng = np.random.default_rng(21)
+    U = rng.normal(size=(3, 6))
+    activity = rng.normal(size=(3, 8, 60))
+    iarea = np.array([8, 0, 8, 5, 3, 8])
+
+    observed = namespace["area_neuron_trial_features"](
+        U,
+        activity,
+        iarea,
+        area_codes=(8,),
+    )
+    component_trial = activity[:, :, :40].mean(axis=2)
+    expected = (U[:, iarea == 8].T @ component_trial).T
+
+    np.testing.assert_allclose(observed, expected)
+
+
+def test_population_embeddings_and_haufe_contributions_are_finite():
+    namespace = load_population_diagnostics_namespace()
+    rng = np.random.default_rng(22)
+    labels = np.tile([0, 1], 12)
+    trial_features = rng.normal(size=(24, 10)) + labels[:, None]
+
+    embeddings = namespace["condition_embeddings"](
+        trial_features,
+        labels,
+    )
+
+    assert embeddings["pca"].shape == (24, 2)
+    assert embeddings["lda"].shape == (24, 2)
+    assert np.isfinite(embeddings["pca"]).all()
+    assert np.isfinite(embeddings["lda"]).all()
+
+    U = rng.normal(size=(4, 8))
+    activity = rng.normal(size=(4, 24, 60))
+    activity[:, labels == 1, :40] += 0.8
+    iarea = np.array([8, 8, 0, 1, 5, 6, 3, 4])
+
+    table = namespace["haufe_area_contributions"](
+        U,
+        activity,
+        iarea,
+        labels,
+    )
+
+    assert table["area"].tolist() == [
+        "V1",
+        "medial",
+        "lateral",
+        "anterior",
+    ]
+    numeric = table.select_dtypes(include=[float, int]).to_numpy()
+    assert np.isfinite(numeric).all()
+    assert table["share_percent"].sum() == pytest.approx(100.0)
+
+
+def test_notebook_runs_population_diagnostics_for_both_sessions():
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    source = "\n".join(cell.source for cell in notebook.cells)
+    required = [
+        'session_label="Before learning"',
+        'session_label="After learning"',
+        'title="V1 circle1/leaf1 population embeddings"',
+        'title="Area contribution to the session decoder"',
+    ]
+    for value in required:
+        assert value in source
