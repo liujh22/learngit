@@ -7,6 +7,7 @@ import pytest
 
 NOTEBOOK = Path(__file__).parents[1] / "Group_B_working_code.ipynb"
 MARKER = "# CROSS_SESSION_AREA_DECODER_UTILS"
+TRIAL_POSITION_MARKER = "# TRIAL_POSITION_UTILS"
 
 
 def load_decoder_namespace():
@@ -18,6 +19,22 @@ def load_decoder_namespace():
     ]
     assert len(matches) == 1, (
         f"expected one decoder utility cell, found {len(matches)}"
+    )
+    namespace = {}
+    exec(compile(matches[0], str(NOTEBOOK), "exec"), namespace)
+    return namespace
+
+
+def load_trial_position_namespace():
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    matches = [
+        cell.source
+        for cell in notebook.cells
+        if cell.cell_type == "code"
+        and TRIAL_POSITION_MARKER in cell.source
+    ]
+    assert len(matches) == 1, (
+        f"expected one trial-position utility cell, found {len(matches)}"
     )
     namespace = {}
     exec(compile(matches[0], str(NOTEBOOK), "exec"), namespace)
@@ -195,3 +212,71 @@ def test_notebook_reports_both_transfer_directions():
     ]
     for value in required:
         assert value in source
+
+
+def test_notebook_has_dedicated_within_session_visualization():
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    source = "\n".join(cell.source for cell in notebook.cells)
+    required = [
+        'within_session_specs = [',
+        '("before_cv_balanced_accuracy", "Before CV")',
+        '("after_cv_balanced_accuracy", "After CV")',
+        'ax.set_title("Within-session decoding by learning stage")',
+        'ax.axhline(0.5',
+    ]
+    for value in required:
+        assert value in source
+
+
+def test_notebook_uses_one_shared_trial_position_function():
+    namespace = load_trial_position_namespace()
+    activity = np.array(
+        [[10, 20, 30, 40, 50, 60, 70]],
+        dtype=float,
+    )
+    cumulative_position = np.array(
+        [0, 1, 1, 2, 3, 4, 5],
+        dtype=float,
+    )
+
+    result = namespace["activity_by_trial_and_position"](
+        activity,
+        cumulative_position,
+        n_trials=1,
+        corridor_length=6,
+    )
+
+    assert result.shape == (1, 1, 6)
+    np.testing.assert_allclose(
+        result[0, 0],
+        [10, 20, 40, 50, 60, 70],
+    )
+
+
+def test_notebook_excludes_decoder_irrelevant_exploration():
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    source = "\n".join(cell.source for cell in notebook.cells)
+    removed_identifiers = [
+        "sup_bef",
+        "sup_aft",
+        "example_activity_",
+        "pattern_activity_",
+        "activity_by_trial_and_position_aft",
+        "activity_by_trial_and_position_bef",
+        "Plot activity by trial and position",
+    ]
+    for identifier in removed_identifiers:
+        assert identifier not in source
+
+
+def test_notebook_documents_non_obvious_decoder_steps():
+    notebook = nbformat.read(NOTEBOOK, as_version=4)
+    source = "\n".join(cell.source for cell in notebook.cells)
+    required_explanations = [
+        "Keep all 60 position bins until gray-region normalization",
+        "Average the session-specific U loadings only within the requested area",
+        "Within-session CV refits the scaler and classifier on every training fold",
+        "The target session is used only for scoring",
+    ]
+    for explanation in required_explanations:
+        assert explanation in source
